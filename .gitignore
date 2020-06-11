@@ -1,3 +1,10 @@
+# User-selected
+*.xlsx
+*.csv
+*.rds
+plots/
+data/
+
 # History files
 .Rhistory
 .Rapp.history

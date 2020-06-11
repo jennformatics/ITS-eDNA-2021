@@ -1,2 +1,2 @@
 # ITS-eDNA-2020
-Codebase for doi:&lt;TBA>
+Snapshot of code used in manuscript doi:&lt;TBA> 
