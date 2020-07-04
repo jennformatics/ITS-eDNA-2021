@@ -1,3 +1,23 @@
+#################
+###  Startup  ###
+#################
+
+# Tidyverse, duh.
+library("tidyverse")
+
+# Graphics additions
+library("RColorBrewer")
+library("gplots"); library("cowplot"); library("egg")  # For "easy" plot stacking
+library("grid"); library("gridExtra")                  # Also for plot combination
+library("extrafont")                                   # (optional) For getting reasonable fonts on Windows
+
+# Analysis additions
+library("phyloseq")
+library("vegan")
+library("VennDiagram")
+library("treemap")
+library("Hmisc"); library("rstatix")                   # Statistical additions
+
 # General functions and settings
 
 dezero <- function(psobj) {
@@ -6,24 +26,37 @@ dezero <- function(psobj) {
     return(psnew)
     }
 
-plot_alpha_diversity_by <- function(var, psobj, measures=c("Shannon", "Simpson", "InvSimpson", "Chao1")) {
-    p <- plot_richness(psobj, x=var, measures=measures, title="")
-    p$layers <- p$layers[-1]  # Remove the default set of points since we can't manipulate them
-    # Now, instead of individual points, do a boxplot.
-    p <- p +   # theme(axis.text.x = element_text(face="italic")) +
-        geom_point(position=position_jitter(w = 0.2, h = 0), aes(shape=DistDepth), size=2, alpha=0.5) + 
-        scale_shape_manual(values=c("Far-Deep"=19, "Far-Shallow"=21, "Near-Deep"=15, "Near-Shallow"=22)) +
-        labs(shape = "Compartment") + 
-        stat_summary(fun.data="mean_sdl", fun.args = list(mult=1), geom="crossbar", width=0.5) +
-        labs(x=var, y="Shannon Index (H')", title=NULL, main=NULL)
-    return(p)
-}
 
 combined_alpha_plot <- function(inputps, namefrag) {
     p <- grid.arrange(plot_alpha_diversity_by(psobj=inputps, var="Lake", measures=indices),
                       plot_alpha_diversity_by(psobj=inputps, var="Depth", measures=indices),
                       plot_alpha_diversity_by(psobj=inputps, var="Distance", measures=indices),
                       layout_matrix = rbind(c(1, 1), c(2, 3)))
+    fname <- paste("plots/background/alpha", namefrag, "pdf", sep=".")
+    ggsave(p, filename=fname, width=8, height=8)
+}
+
+four_compartments_ordered <- c("Offshore-Benthic", "Offshore-Surface", "Nearshore-Benthic", "Nearshore-Surface")
+four_shapes_ordered <- c(19, 21, 15, 22)
+light="deepskyblue"; dark="blue"
+four_colors_ordered <- c(dark, light, dark, light)
+shapedf <- reshape2::melt(data.frame(k=four_compartments_ordered, v=four_shapes_ordered), variable.name="k", value.name="v")
+shapes <- setNames(as.character(shapedf$v), shapedf$k)
+colordf <- reshape2::melt(data.frame(k=four_compartments_ordered, v=four_colors_ordered), variable.name="k", value.name="v")
+colors <- setNames(as.character(colordf$v), colordf$k)
+
+plot_alpha_diversity_by <- function(var, psobj, measures=c("Shannon", "Simpson", "InvSimpson", "Chao1"), scalefac=1) {
+    p <- plot_richness(psobj, x=var, measures=measures, title="")
+    p$layers <- p$layers[-1]  # Remove the default set of points since we can't manipulate them
+    # Now, instead of individual points, do a boxplot.
+    p <- p +   # theme(axis.text.x = element_text(face="italic")) +
+        geom_point(position=position_jitter(w = 0.2, h = 0), aes(shape=Compartment, color=Compartment), size=scalefac, stroke = 1.2*scalefac) + 
+        stat_summary(fun.data="mean_sdl", fun.args = list(mult=1), geom="crossbar", width=0.5, show.legend=FALSE) +
+        labs(x=var, y="Shannon Index (H')", title=NULL, main=NULL) +
+        scale_discrete_manual("Compartment", values=as.integer(shapes), labels=four_compartments_ordered, aesthetics="shape") +
+        scale_color_manual("Compartment", values=colors, labels=four_compartments_ordered, aesthetics=c("color", "fill")) +
+        labs(shape = "Compartment") + 
+        theme(text = element_text(size=12), strip.text.x = element_blank())
     return(p)
 }
 
@@ -50,6 +83,11 @@ plot_with_hull_ordered <- function(psobj, ord, var, type="samples") {
              guides(fill=FALSE) + labs(color=var, fill=var) # + make_stress_label(ord)
     return(p)
     }
+
+taxplot_with_names <- function(psobj, ord, var, textfield, type="taxa") {
+    p <- plot_ordination(psobj, ord, color=var, type=type, label=textfield) + guides(col = guide_legend(ncol=1))
+    return(p)
+}
 
 lakeplot_with_hull_ordered <- function(psobj, ord, var, type="samples") {
     p <- plot_ordination(psobj, ord, color=var)
@@ -86,7 +124,7 @@ plot_bar_jd <- function (physeq, x = "Sample", y = "Abundance", ylab = "Abundanc
     return(p)
 }
 
-jd_treemap <- function(fulldata, fieldname, fontsizes=c(20, 16), colors=twogreens) {
+treemap_jd <- function(fulldata, fieldname, fontsizes=c(20, 16), colors=twogreens) {
     fulldata <- fulldata %>% mutate("SortCol"=rev(rank(Vascularity)))
     tm2 <- treemap(fulldata, index=c("Vascularity", "Taxon.Category"), vSize=fieldname, type="categorical",
                    title="", position.legend="none",
@@ -95,14 +133,43 @@ jd_treemap <- function(fulldata, fieldname, fontsizes=c(20, 16), colors=twogreen
                    align.labels=list(c("left", "top"), c("right", "bottom")), overlap.labels=0.5, inflate.labels=F,
                    border.lwds=c(5, 2), border.col=c("#385723", "white"),
                    vColor="Vascularity", palette=colors,
-                   aspRatio=3, algorithm="pivotSize", sortID="SortCol")
+                   aspRatio=3, algorithm="pivotSize", sortID="SortCol", draw=T)
+    return(tm2)
+}
+
+pval_mann_whitney <- function(indexname, inputps1, inputps2) {
+    rich1 <- unlist(unname(estimate_richness(inputps1, measures=indexname)))
+    rich2 <- unlist(unname(estimate_richness(inputps2, measures=indexname)))
+    output <- wilcox.test(rich1, rich2, correct=FALSE)$p.value
+    names(output) <- indexname
+    return(output)
+}
+
+bdiv <- function(psobj, frml, samblk="Lake", b=2) {
+    sam <- data.frame(sample_data(dezero(psobj)))
+    blkfactor <- as.factor(unname(as.matrix(sam[samblk])))
+    onorm <- otu_table(decostand(data.frame(otu_table(dezero(psobj))), method="log", logbase=b, na.rm=TRUE), taxa_are_rows=FALSE)
+    nperms <- 999; perm <- how(nperm = nperms); setBlocks(perm) <- with(sam, blkfactor)
+    adonis(as.formula(paste("onorm ~ ", frml)), data=sam, permutations=perm)
+}
+
+bdivnoblk <- function(psobj, frml, b=2) {
+    sam <- data.frame(sample_data(dezero(psobj)))
+    onorm <- otu_table(decostand(data.frame(otu_table(dezero(psobj))), method="log", logbase=b, na.rm=TRUE), taxa_are_rows=FALSE)
+    nperms <- 999; perm <- how(nperm = nperms)
+    adonis(as.formula(paste("onorm ~ ", frml)), data=sam, permutations=perm)
 }
 
 # Specific utility functions and definitions used by the above
 
-nmdstheme <- theme_set(theme_minimal()) +
-             theme_update(plot.background = element_rect(color="black", size=0.25), plot.margin = unit(c(.5, .5, .5, .5), "cm")) +
-             theme_update(plot.background = element_rect(fill="white", color="white"))
+nmdstheme <- theme_set(theme_minimal(base_size = 12)) +
+             theme_update(plot.background = element_rect(color="black", fill="white", size=0.25),
+                          plot.margin = unit(c(.5, .5, .5, .5), "cm"))
+
+make_stress_label <- function(ord) {
+    thing <- annotate("text", label=paste("k=", ord$ndim, "; Stress=", as.character(format(ord$stress, digits=5)), sep=""),
+                      x=-Inf, y = Inf, vjust=1.5, hjust=0)
+    return(thing) }
 
 make_nmds_title <- function(datasetname) {
     return(textGrob(label = paste("NMDS on ", datasetname, sep=""),
@@ -111,9 +178,6 @@ make_nmds_title <- function(datasetname) {
 make_alpha_title <- function(datasetname) {
     return(textGrob(label = paste("Alpha diversity for ", datasetname, sep=""),
     x = unit(0, "lines"), y = unit(0, "lines"), hjust = 0, vjust = 0, gp = gpar(fontsize = 14))) }
-
-make_stress_label <- function(ord) {
-    return(annotate("text", label=paste("k=", ord$ndim, "; Stress=", as.character(ord$stress), sep=""), x=min(ord$points[,1]), y = Inf, vjust=1.5, hjust=0)) }
 
 # Function to generate "hulls" around different sets of points in NMDS data.
 find_hull <- function(df) df[chull(df$NMDS1, df$NMDS2), ]
