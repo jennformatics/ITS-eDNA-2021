@@ -1,7 +1,7 @@
 setwd("~/Box Sync/Projects/UNDERC-ITS/Analysis/ITS-eDNA-2020/04-analysis")
 source("utility-functions.R")  # includes imports, functions, and other startup
 
-currentfilename <- "data/ps-objects-set-b.RData"
+currentfilename <- "data/ps.RData"
 load(file=currentfilename)
 
 
@@ -9,20 +9,13 @@ load(file=currentfilename)
 ###  Load (highly customized) data  ###
 #######################################
 
-# plants.csv is a combined OTU table and taxon description table.
-# It's separated in my local case at column 39. (Though I should probably use a dplyr select instead.)
-rawdata <- read.table("data/plants.csv", sep=",", header=TRUE, row.names=1)
-rawmetadata <- data.frame(rawdata[1:39])
-rawmetadata$UnspacedSciName <- rownames(rawmetadata)
-# This one will give errors about some entries being messy, with not exactly two components. That's fine.
-inputtaxa <- data.frame(rawmetadata %>% separate(UnspacedSciName, into=c("Genus", "Species")) %>% replace_na(list(Species="sp.")))
-# Actual taxon-vs-species read table. Includes controls, but they'll be taken out for lack of metadata shortly.
-inputotus <- t(rawdata[40:dim(rawdata)[2]])
-
 # Import sample metadata, and create "Compartment" column.
-inputsamples <- read.table("data/sample-metadata.csv", sep=",", header=TRUE, row.names=1) %>% rownames_to_column("ShortName")
+inputsamples <- read.table("data/sample-metadata.txt", sep="\t", header=TRUE, row.names=1) %>% rownames_to_column("ShortName")
 
-mungedsamples <- inputsamples %>%
+# CHANGE HERE if going back to 12 lakes.
+workingsamples <- inputsamples # %>% filter(!Run %in% c("32", "33"))
+
+mungedsamples <- workingsamples %>%
   mutate(Depth = case_when(Depth == 'Shallow' ~ 'Surface', Depth == 'Deep' ~ 'Benthic', TRUE ~ 'NA')) %>%
   mutate(Distance = case_when(Distance == 'Near' ~ 'Nearshore', Distance == 'Far' ~ 'Offshore', TRUE ~ 'NA')) %>%
   mutate(Compartment = paste(Distance, Depth, sep="-")) %>%
@@ -32,6 +25,21 @@ mungedsamples <- inputsamples %>%
                                       Compartment == 'Offshore-Benthic' ~ 'OffBenth',
                                       TRUE ~ 'NA')) %>%
   column_to_rownames("ShortName")
+
+# plants.csv is a combined OTU table and taxon description table.
+# It's separated in my local case between metadata field "Org.Lake.Prs" and sample name "MC-32".
+
+rawdata <- read.table("data/plants-2020-05-27-ancestral-1st-manuscript.csv", sep=",", header=TRUE, row.names=1)
+# rawdata <- read.table("data/plants.csv", sep=",", header=TRUE, row.names=1)
+
+rawmetadata <- dplyr::select(rawdata, 1:Org.Lake.Prs)  # data.frame(rawdata[1:39])
+rawmetadata$UnspacedSciName <- rownames(rawmetadata)
+# This one will give errors about some entries being messy, with not exactly two components. That's fine.
+inputtaxa <- data.frame(rawmetadata %>% separate(UnspacedSciName, into=c("Genus", "Species")) %>% replace_na(list(Species="sp.")))
+# Actual taxon-vs-species read table. Includes controls, but they'll be taken out for lack of metadata shortly.
+
+inputotucols <- select(rawdata, starts_with("MC"):last_col())
+inputotus <- inputotucols %>% select(one_of(workingsamples$ShortName)) %>% t()
 
 # Make PS
 ot <- otu_table(inputotus, taxa_are_rows=FALSE)
@@ -44,29 +52,23 @@ psraw <- phyloseq(ot, tt, sd)
 
 # Remove all samples that have NAs in their metadata -- basically, the blanks.
 nonblank_samples <- rownames(na.omit(sample_data(psraw)))
-ps <- subset_samples(psraw, sample_names(psraw) %in% nonblank_samples)
+ps12old <- subset_samples(psraw, sample_names(psraw) %in% nonblank_samples)
 
-ps_all <- dezero(ps)    # dezero is provided in utility-functions.R
-ps_set_a <- dezero(subset_samples(ps, Primer=="ITS1-F/-R"))
-ps_set_b <- dezero(subset_samples(ps, Primer=="ITS1-F/-R3"))
-
-ps <- ps_all
-save(file="data/ps-objects-all.RData", ps_all)
-ps <- ps_set_a
-save(file="data/ps-objects-set-a.RData", ps_set_a)
-ps <- ps_set_b
-save(file="data/ps-objects-set-b.RData", ps_set_b)
-
-# Pick one:
-# currentfilename <- "ps-objects-set-a.RData"
-# currentfilename <- "data/ps-objects-all.RData"
-currentfilename <- "data/ps-objects-set-b.RData"
-
+currentfilename <- "data/ps.RData"
+save(file=currentfilename, ps, ps6old, ps6new, ps12old, ps12new)  # plain ps is actually ps6new
 load(file=currentfilename)
 
 # From this point on, "ps" is the placeholder for whatever full or half dataset you're working with.
 # Eventually we'll have: ps, psbig, psdd, pslake, psddten, pslaketen, pswet, pswetdd, pswetlake, pswetlakepct
 
+# > sum(otu_table(ps12new))
+# [1] 1819384
+# > sum(otu_table(ps12old))
+# [1] 1887671
+# > sum(otu_table(ps6new))
+# [1] 1325970
+# > sum(otu_table(ps6old))
+# [1] 1328139
 
 ##########################################
 ###  Rarefaction curve for inspection  ###
@@ -83,11 +85,12 @@ dev.off()
 
 # Generates basic bar graphs and heatmaps for internal consumption
 
-# Basic sample aggregation levels
-pslake <- merge_samples(ps, "Lake")     # 12 samples, 3
-psdd <- merge_samples(ps, "Compartment")
+pstmp <- ps6old
 
-pstmp <- ps
+# Basic sample aggregation levels
+pslake <- merge_samples(pstmp, "Lake")     # 12 samples, 3
+psdd <- merge_samples(pstmp, "Compartment")
+
 # Remove all columns except the ones we're about to glom on.
 tax_table(pstmp) <- tax_table(pstmp)[,c("Vascularity", "WetlandSort", "WetlandStatus")]
 pswet <- tax_glom(pstmp, "WetlandStatus")                 # 7 taxa
@@ -112,15 +115,6 @@ top_tax_table <- left_join(otutops, allsums)
 rownames(top_tax_table) <- top_tax_table[,"TaxName"]
 top_tax_table %>% arrange(TaxTotal) %>% tail(20)
 
-# TaxName                 TopIn
-# Nuphar.variegata	Bay, Hum, Ink
-# Peridinium.wierzejskii	Mor
-# Chrysophyceae.sp03	Long
-# Synura.mammillosa	Ras
-# Potamogeton	
-# Gonyostomum.semen	
-# Potamogeton.lucens	
-
 # Plot absolute and relative read numbers per lake for vasculars and nonvasculars.
 vascbar <- plot_bar_jd(pswetlake, fill="Vascularity")
 pswetlakepct <- transform_sample_counts(pswetlake, function(x) x / sum(x))
@@ -141,6 +135,7 @@ pswetdd <- dezero(merge_samples(pswet, "Compartment"))
 sample_data(pswetdd)[,"Compartment"] <- sample_names(pswetdd)
 sample_data(pswetdd) <- sample_data(pswetdd)[,"Compartment"]
 
+# tax_descs <- c("Agricultural", "Upland", "Fac. Upland", "Facultative", "Fac. Wetland", "Obligate Wetland", "Aquatic", "Algae")
 tax_descs <- c("Upland", "Fac. Upland", "Facultative", "Fac. Wetland", "Obligate Wetland", "Aquatic", "Algae")
 
 tax_table(pswetdd) <-
@@ -183,13 +178,13 @@ save(file=currentfilename, ps, psdd, pslake, pswet)
 
 theme_set(theme_minimal() + theme(plot.background = element_rect(fill="white", color="white")))
 
-indices <- c("Shannon")  # "InvSimpson", "Simpson", "Chao1"
+indices <- c("Shannon")  #, "InvSimpson", "Simpson", "Chao1")
 # combined_alpha_plot(inputps=ps, namefrag="diversity")
 
 # New specific plots for paper/presentation
 
 inputps <- ps
-lakemeta <- read.table("data/lake-metadata.csv", header=TRUE, sep=",", colClasses=c("Lake"="character"))
+lakemeta <- read.table("data/lake-metadata.txt", header=TRUE, sep="\t", colClasses=c("Lake"="character"))
 
 p1 <- ggplot(lakemeta, mapping=aes(x=Lake, y=Area, group=1)) +
       geom_col(size=1, color="#0099FF", fill="#0099FF", width=0.5) +
@@ -205,10 +200,10 @@ p2 <- plot_alpha_diversity_by(psobj=inputps, var="Lake", measures=indices) +
 p2 
 
 ratio <- c(0.2, 0.8)
-cowplot::plot_grid(p1, p2, align = "v", ncol = 1, rel_heights = ratio)
+# cowplot::plot_grid(p1, p2, align = "v", ncol = 1, rel_heights = ratio)
 e <- egg::ggarrange(p1, p2, heights = ratio)
 ggsave(e, filename="plots/complex-lake-alpha-div.pdf", h=4, w=8)
-    
+
 scalefac <- 2
 themetweak <- theme(legend.position="none", text = element_text(size=rel(2*scalefac)), axis.text.x = element_text(size=rel(2*scalefac), angle=0, hjust=0.5))
 # l <- plot_alpha_diversity_by(psobj=inputps, var="Lake", measures=indices)
@@ -226,8 +221,8 @@ ggsave(dis, filename="plots/alpha.shannon.dist.pdf", height=4, width=4)
 
 # Linear regression for alpha diversity vs. area. Will need to update for the overall Spearman thing.
 
+# Already done above:
 lakemeta <- read.table("data/lake-metadata.txt", header=TRUE, sep="\t", colClasses=c("Lake"="character"))
-lakemeta <- lakemeta[lakemeta["LakeSet"] == "B",]  # Fix this to be automatic.
 indices <- c("Shannon")  # "InvSimpson", "Simpson", "Chao1"
 inputps <- ps
 pdata <- plot_alpha_diversity_by(psobj=inputps, var="Lake", measures=indices)$data  # Same as p2 above.
@@ -238,11 +233,10 @@ mean_vs_area <- left_join(alphadivmeans, lakeareas)
 mean_vs_area <- mutate(mean_vs_area, logarea=log(Area))
 mean_vs_area <- mutate(mean_vs_area, squarea=sqrt(Area))
 
-cor_test(mean_vs_area, "mean", "Area", method="spearman")    # rho=0.94, p = 0.005
-cor_test(mean_vs_area, "mean", "Area", method="pearson")     # r=0.80, p=0.055
-cor_test(mean_vs_area, "mean", "squarea", method="pearson")  # r=0.88, p=0.022
-
-cor_test(mean_vs_area, "mean", "logarea", method="pearson")  # r=0.95, p=0.004
+cor_test(mean_vs_area, "mean", "Area", method="spearman")    # rho=0.26, p = 0.658  --> rho=0.94? p=0.01
+cor_test(mean_vs_area, "mean", "Area", method="pearson")     # r=0.14, p=0.796   0.8  0.056
+cor_test(mean_vs_area, "mean", "squarea", method="pearson")  # r=0.16, p=0.76    0.88 0.022
+cor_test(mean_vs_area, "mean", "logarea", method="pearson")  # r=0.2,  p=0.698   0.95 0.006
 
 qplot(mean_vs_area$mean, mean_vs_area$logarea)   # R^2 = 0.8759, according to lm(formula = mean_vs_area$mean ~ mean_vs_area$logarea)
 ggsave(filename="plots/background/area-diversity-dotplot.pdf", h=3, w=3)
@@ -256,7 +250,7 @@ alphadiv <- plot_alpha_diversity_by(psobj=inputps, var="Lake", measures=indices)
 lakeshannonmeans <- alphadiv %>% group_by(variable, Lake) %>% dplyr::summarize(mean=mean(value)) %>% spread(variable, mean)
 bylake <- left_join(lakemeta, lakeshannonmeans) %>%
           subset(lakemeta$Lake %in% sample_data(ps)$Lake) %>%
-          select(-LakeAbbr, -LakeSet, -Date, -AlphaSort) %>%
+          select(-LakeAbbr, -Primer, -Date, -AlphaSort, -NearBelowMixed, -FarBelowMixed, -SetSort) %>%
           remove_rownames() %>% column_to_rownames("Lake")
 
           # mutate(ShannonRank=rank(Shannon), ShannonNorm=Shannon/sum(Shannon)) %>%
@@ -281,36 +275,33 @@ ggsave("plots/background/alternate-alpha-plots.pdf", h=8, w=8)
 inputps <- ps
 
 print("Mann-Whitney test on alpha diversity by depth category:")
-inputps1 <- subset_samples(inputps, Depth=="Shallow")
-inputps2 <- subset_samples(inputps, Depth=="Deep")
+inputps1 <- subset_samples(inputps, Depth=="Surface")
+inputps2 <- subset_samples(inputps, Depth=="Benthic")
 rev(unlist(lapply(indices, function(x) { pval_mann_whitney(x, inputps1, inputps2) } ), recursive=TRUE))
 
 print("Mann-Whitney test on alpha diversity by shore distance category:")
-inputps1 <- subset_samples(inputps, Distance=="Far")
-inputps2 <- subset_samples(inputps, Distance=="Near")
+inputps1 <- subset_samples(inputps, Distance=="Offshore")
+inputps2 <- subset_samples(inputps, Distance=="Nearshore")
 rev(unlist(lapply(indices, function(x) { pval_mann_whitney(x, inputps1, inputps2) } ), recursive=TRUE))
 
-# Depth, for 3738 runs
-#     Chao1   Shannon 
-# 0.8714475 0.7327865 
-# # Dist, for 3738 runs
-#      Chao1    Shannon 
-# 0.07539991 0.00264300 
+# But now...0.74 and 0.002. Distance is significant again.
 
 
 ########################
 ###  Beta Diversity  ###
 ########################
 
-# Lots of stuff about adonis is specific to the ps object, so wrap it in a function.
+# Lots of stuff about how adonis is specific to the ps object, so wrap it in a function.
 # The log+1 normalization with dEcoStand is baked in here.
     # "as suggested by Anderson et al. (2006): log_b (x) + 1 for x > 0"
     # Higher bases give less weight to quantities and more to presences, and logbase = Inf gives the presence/absence scaling.
     # Please note this is not log(x+1).
 
+inputps <- ps
+
 # Create "psbig", with only the taxa that appear in five or more samples, and only samples that have 100 or more reads.
-taxa_under_five <- colnames(otu_table(ps))[unlist(lapply(colnames(otu_table(ps)), function(x) { sum(as.numeric(unname(otu_table(ps)[,x])>0)) })) < 5]
-psbig <- subset_taxa(ps, !colnames(otu_table(ps)) %in% taxa_under_five)
+taxa_under_five <- colnames(otu_table(inputps))[unlist(lapply(colnames(otu_table(inputps)), function(x) { sum(as.numeric(unname(otu_table(inputps)[,x])>0)) })) < 5]
+psbig <- subset_taxa(inputps, !colnames(otu_table(inputps)) %in% taxa_under_five)
 psbig <- subset_samples(psbig, sample_sums(psbig) > 100)
 
 pscomplement <- subset_taxa(ps, colnames(otu_table(ps)) %in% taxa_under_five)
@@ -318,7 +309,7 @@ table(tax_table(pscomplement)[,"Vascularity"])   # Breakdown of eliminated taxa.
 
 save(file=currentfilename, ps, psbig, psdd, pslake, psddtops, pslaketops, pswet, pswetdd, pswetlake, pswetlakepct)
 
-inputps <- ps
+inputps <- psbig    # or psbig
 indices <- c("Shannon")
 
 alphadiv <- plot_alpha_diversity_by(psobj=inputps, var="Lake", measures=indices)$data
@@ -326,7 +317,7 @@ lakeshannonmeans <- alphadiv %>% group_by(variable, Lake) %>% dplyr::summarize(m
 lakemeta <- read.table("data/lake-metadata.txt", header=TRUE)
 bylake <- left_join(lakemeta, lakeshannonmeans) %>%
           subset(lakemeta$Lake %in% sample_data(ps)$Lake) %>%
-          select(-LakeAbbr, -LakeSet, -Date, -AlphaSort) %>%
+          select(-LakeAbbr, -Date, -AlphaSort) %>%
           remove_rownames() %>% column_to_rownames("Lake")
 
           # mutate(ShannonRank=rank(Shannon), ShannonNorm=Shannon/sum(Shannon)) %>%
@@ -352,21 +343,22 @@ r2withinlakes <- glarg %>% as.data.frame %>% rownames_to_column %>% rename(Lake=
 
 alpharanks <- alpharanks %>% rownames_to_column %>% rename(Lake=rowname)
 moarcor <- alpharanks %>% left_join(pwithinlakes) %>% left_join(r2withinlakes) %>% as.data.frame
-moarcor <- moarcor %>% select(-Lake)
-# moarcor <- moarcor %>% select(-AlphaSort, -Date, -variable, -LakeAbbr, -Lake)
+moarcor <- moarcor %>% select(-Lake, -Primer, -FarBelowMixed, -NearBelowMixed, -SetSort)
 bluegold <- colorRampPalette(c("blue", "white", "gold"))
-heatmap(cor(moarcor, method="spearman"), symm=TRUE, Rowv=NA, Colv="Rowv", col=bluegold(100))
+# heatmap(cor(moarcor, method="spearman"), symm=TRUE, Rowv=NA, Colv="Rowv", col=bluegold(100))
 
 lesscor <- as.tbl(moarcor) %>% select(-starts_with("Norm"), -starts_with("Chao"), -starts_with("PD"), -R2DD)
 
 spears <- cor(lesscor, method="spearman")
 colbreaks <- c(seq(min(spears), -0.01, length=50), 0, seq(0.01, max(spears), length=50))
+pdf("plots/sophisticated-spearman-heatmap.pdf")
 heatmap.2(spears, symm=TRUE, Rowv=NULL, Colv="Rowv", col=bluegold(100), breaks=colbreaks,
           trace="none", density.info="none", dendrogram="none",
           colsep=5,
           rowsep=5,
           sepcolor="black",
           sepwidth=c(0.1,0.1) )
+dev.off()
 
 # Utilities from http://www.sthda.com/english/wiki/correlation-matrix-a-quick-start-guide-to-analyze-format-and-visualize-a-correlation-matrix-using-r-software#correlation-matrix-with-significance-levels-p-value
 
@@ -392,9 +384,10 @@ flatCorrMatrix <- function(dattab) {
 fcm <- flatCorrMatrix()
 
 arrange(fcm, abs(cor)) %>% filter(p<0.1)
-#        row  column       cor          p
-# 1     Area Shannon 0.8009994 0.05546150
-# 2 MaxDepth Clarity 0.8353977 0.03841103
+# row   column       cor          p
+# 1     Area  Shannon 0.7995966 0.05621806
+# 2 WestRank MaxDepth 0.8231026 0.04417122
+# 3 MaxDepth  Clarity 0.8353977 0.03841103
 
 
 ###################
@@ -431,28 +424,30 @@ theme_set(nmdstheme)
 # ord.bray.k20 <- ordinate(ps, method="NMDS", distance="bray", k=20, trymax=100)
 # saveRDS(ord.bray.k20, file="data/ord.bray.k20.rds")
 
+inputps <- dezero(ps)
 ordfile <- "data/ord.bray.k20.rds"
 if(file.exists(ordfile)) {
     ord.bray.k20 <- readRDS(file=ordfile)
 } else {
     k=20
-    ord.bray.k20 <- ordinate(ps, method="NMDS", distance="bray", k=20, trymax=100)
+    ord.bray.k20 <- ordinate(inputps, method="NMDS", distance="bray", k=20, trymax=100)
     saveRDS(ord.bray.k20, file=ordfile)
 }
 ord.nmds.bray = ord.bray.k20
 
-lakeplot <- plot_with_hull(ps, ord.nmds.bray, "Lake") + make_stress_label(ord.nmds.bray)
-distplot <- plot_with_hull(ps, ord.nmds.bray, "Distance")
-depthplot <- plot_with_hull(ps, ord.nmds.bray, "Depth")
-runplot <- plot_with_hull(ps, ord.nmds.bray, "Run")
-primerplot <- plot_with_hull(ps, ord.nmds.bray, "Primer") + scale_color_manual(values = c("darkgreen", "purple"), aesthetics = c("color", "fill"))
+lakeplot <- plot_with_hull(inputps, ord.nmds.bray, "Lake") + make_stress_label(ord.nmds.bray)
+distplot <- plot_with_hull(inputps, ord.nmds.bray, "Distance")
+depthplot <- plot_with_hull(inputps, ord.nmds.bray, "Depth")
+compplot <- plot_with_hull(inputps, ord.nmds.bray, "Compartment")
+runplot <- plot_with_hull(inputps, ord.nmds.bray, "Run")
+primerplot <- plot_with_hull(inputps, ord.nmds.bray, "Primer") + scale_color_manual(values = c("darkgreen", "purple"), aesthetics = c("color", "fill"))
 
-taxplot <- plot_with_hull(ps, ord.nmds.bray, "Vascularity", type="taxa")
-taxplot <- taxplot + scale_color_manual(values = c("green", "darkgreen"), aesthetics = c("color", "fill"))
+vascplot <- plot_with_hull(inputps, ord.nmds.bray, "Vascularity", type="taxa")
+vascplot <- vascplot + scale_color_manual(values = c("green", "darkgreen"), aesthetics = c("color", "fill"))
 
-wetnessplot <- plot_with_hull_ordered(ps, ord.nmds.bray, "WetlandStatus", type="taxa")
+wetnessplot <- plot_with_hull_ordered(inputps, ord.nmds.bray, "WetlandStatus", type="taxa")
 
-speciesplot <- taxplot_with_names(ps, ord.nmds.bray, "WetlandStatus", "SimpleSciName") +
+speciesplot <- taxplot_with_names(inputps, ord.nmds.bray, "WetlandStatus", "NCBISciName") +
     scale_color_manual(values=c("#00AA0033", "turquoise", "blue", "purple", "red", "orange", "yellow"))
 
 ggsave(lakeplot, file="plots/nmds-lake.pdf", width=6.25, height=5)
@@ -460,7 +455,7 @@ ggsave(distplot, file="plots/nmds-dist.pdf", width=6.25, height=5)
 ggsave(depthplot, file="plots/nmds-depth.pdf", width=6.25, height=5)
 ggsave(runplot, file="plots/background/nmds-run.pdf", width=6.25, height=5)
 ggsave(primerplot, file="plots/background/nmds-primer.pdf", width=6.25, height=5)
-ggsave(taxplot, file="plots/background/nmds-taxa.pdf", width=6.25, height=5)
+ggsave(vascplot, file="plots/background/nmds-vascularity.pdf", width=6.25, height=5)
 ggsave(wetnessplot, file="plots/background/nmds-wetness.pdf", width=6.25, height=5)
 
 ggsave(speciesplot, file="plots/background/nmds-species.pdf", width=6.25, height=5)
@@ -473,6 +468,39 @@ ggsave(speciesplot, file="plots/background/nmds-species-large.pdf", width=18, he
 
 
 # ============== Experimental =============== #
+
+pssp2 <- subset_samples(ps, Lake=="Hummingbird")
+ord.bray.sp2 <- ordinate(pssp2, method="NMDS", distance="bray", k=4, trymax=100)
+sp2b <- plot_with_hull(pssp2, ord.bray.sp2, "Depth") + make_stress_label(ord.bray.sp2)
+sp2b
+
+pssp6 <- subset_samples(ps, Lake=="Raspberry")
+ord.bray.sp6 <- ordinate(pssp6, method="NMDS", distance="bray", k=4, trymax=100)
+sp6b <- plot_with_hull(pssp6, ord.bray.sp6, "Distance") + make_stress_label(ord.bray.sp6)
+sp6b
+
+# or...
+depthlakes <- depthplot
+depthlakes$layers <- depthlakes$layers[1]
+depthlakes <- depthlakes + facet_wrap("Lake", scales="fixed") +
+  geom_hline(yintercept=0, color="grey", size=0.5) +
+  geom_vline(xintercept=0, color="grey", size=0.5) +
+  theme(panel.spacing = unit(1.5, "lines"))
+
+distlakes <- distplot
+distlakes$layers <- distlakes$layers[1]
+distlakes <- distlakes + facet_wrap("Lake", scales="fixed") +
+  geom_hline(yintercept=0, color="grey", size=0.5) +
+  geom_vline(xintercept=0, color="grey", size=0.5) +
+  theme(panel.spacing = unit(1.5, "lines"))
+
+complakes <- compplot
+complakes$layers <- complakes$layers[1]
+complakes <- complakes + facet_wrap("Lake", scales="fixed") +
+  geom_hline(yintercept=0, color="grey", size=0.5) +
+  geom_vline(xintercept=0, color="grey", size=0.5) +
+  theme(panel.spacing = unit(1.5, "lines"))
+
 pssp1 <- subset_samples(ps, Lake=="Bay")
 ord.bray.sp1 <- ordinate(pssp1, method="NMDS", distance="bray", k=4, trymax=100)
 sp1 <- taxplot_with_names(pssp1, ord.bray.sp1, "WetlandStatus", "SimpleSciName") +
@@ -480,12 +508,18 @@ sp1 <- taxplot_with_names(pssp1, ord.bray.sp1, "WetlandStatus", "SimpleSciName")
   make_stress_label(ord.bray.sp1)
 sp1
 
+sp1b <- plot_with_hull(inputps, ord.bray.sp1, "Compartment") + make_stress_label(ord.nmds.bray)
+sp1b
+
 pssp2 <- subset_samples(ps, Lake=="Hummingbird")
 ord.bray.sp2 <- ordinate(pssp2, method="NMDS", distance="bray", k=4, trymax=100)
 sp2 <- taxplot_with_names(pssp2, ord.bray.sp2, "WetlandStatus", "SimpleSciName") +
   scale_color_manual(values=c("#00AA0033", "turquoise", "blue", "purple", "red", "orange", "yellow")) +
   make_stress_label(ord.bray.sp2)
 sp2
+
+sp2b <- plot_with_hull(inputps, ord.bray.sp2, "Compartment") + make_stress_label(ord.nmds.bray)
+sp2b
 
 pssp3 <- subset_samples(ps, Lake=="Inkpot")
 ord.bray.sp3 <- ordinate(pssp3, method="NMDS", distance="bray", k=4, trymax=100)
@@ -529,8 +563,6 @@ bylake_text_nmds <- function(inlake, k) {
 bylake_text_nmds(inlake="Raspberry", k=4)
 # Error in eval(e, x, parent.frame()) : object 'inlake' not found
 
-# ============== End experimental =============== #
-
 # Betadisper
 
 d <- vegdist(otu_table(ps))
@@ -542,6 +574,8 @@ betadisper(d, sample_data(ps)[,"Depth"], type="median")
 
 levels(as.factor(is.na(sample_data(ps)[,"Depth"])))
 # [1] "FALSE"
+
+# ============== End experimental =============== #
 
 
 #######################
@@ -566,10 +600,10 @@ cols=c("#FF660066", "#0000FF66", "#FFFF0066", "#00FF0066")
 
 inputps <- psbig
 
-psns <- dezero(subset_samples(inputps, Compartment=="Near-Shallow"))
-psnd <- dezero(subset_samples(inputps, Compartment=="Near-Deep"))
-psfs <- dezero(subset_samples(inputps, Compartment=="Far-Shallow"))
-psfd <- dezero(subset_samples(inputps, Compartment=="Far-Deep"))
+psns <- dezero(subset_samples(inputps, Compartment=="Nearshore-Surface"))
+psnd <- dezero(subset_samples(inputps, Compartment=="Nearshore-Benthic"))
+psfs <- dezero(subset_samples(inputps, Compartment=="Offshore-Surface"))
+psfd <- dezero(subset_samples(inputps, Compartment=="Offshore-Benthic"))
 
 ns <- taxa_names(psns)
 nd <- taxa_names(psnd)
@@ -590,8 +624,6 @@ deeponly
 shallowonly
 
 # table(tax_table(dezero(subset_samples(psvasc, sample_names(psvasc)=="Near-Deep")))[,"WetlandStatus"])
-
-
 
 
 #################
@@ -615,6 +647,12 @@ readother <- filter(tinput, Reads < readthresh) %>% group_by(Vascularity) %>% dp
 fullreadinput <- rbind(readbig, readother) %>% group_by(Vascularity, Taxon.Category) %>% dplyr::summarize(Reads=sum(Reads))
 
 pdf(file="plots/treemap-reads.pdf", h=2.5, w=7.5)
+# dev.new(h=2.5, w=7.5)
+treemap_jd(fullreadinput, "Reads", c(19, 13))
+dev.off()
+sum(fullreadinput$Reads)   # ~1.3M
+
+svg(file="plots/treemap-reads.svg", h=2.5, w=7.5)
 # dev.new(h=2.5, w=7.5)
 treemap_jd(fullreadinput, "Reads", c(19, 13))
 dev.off()
