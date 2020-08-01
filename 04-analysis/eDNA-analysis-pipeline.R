@@ -9,42 +9,62 @@ load(file=currentfilename)
 ###  Load (highly customized) data  ###
 #######################################
 
-# Import sample metadata, and create "Compartment" column.
+# SAMPLES: Import sample metadata.
 inputsamples <- read.table("data/sample-metadata.txt", sep="\t", header=TRUE, row.names=1) %>% rownames_to_column("ShortName")
 
 # CHANGE HERE if going back to 12 lakes.
-workingsamples <- inputsamples # %>% filter(!Run %in% c("32", "33"))
+workingsamples <- inputsamples %>% filter(Run %in% c("32", "33"))
+workingsamples <- workingsamples %>% column_to_rownames("ShortName")
 
-mungedsamples <- workingsamples %>%
-  mutate(Depth = case_when(Depth == 'Shallow' ~ 'Surface', Depth == 'Deep' ~ 'Benthic', TRUE ~ 'NA')) %>%
-  mutate(Distance = case_when(Distance == 'Near' ~ 'Nearshore', Distance == 'Far' ~ 'Offshore', TRUE ~ 'NA')) %>%
-  mutate(Compartment = paste(Distance, Depth, sep="-")) %>%
-  mutate(ShortCompartment = case_when(Compartment == 'Nearshore-Surface' ~ 'NearSurf',
-                                      Compartment == 'Offshore-Surface' ~ 'OffSurf',
-                                      Compartment == 'Nearshore-Benthic' ~ 'NearBenth',
-                                      Compartment == 'Offshore-Benthic' ~ 'OffBenth',
-                                      TRUE ~ 'NA')) %>%
-  column_to_rownames("ShortName")
-
-# plants.csv is a combined OTU table and taxon description table.
+# OTUS AND TAXA: plants.csv is a combined OTU table and taxon description table.
 # It's separated in my local case between metadata field "Org.Lake.Prs" and sample name "MC-32".
 
-rawdata <- read.table("data/plants-2020-05-27-ancestral-1st-manuscript.csv", sep=",", header=TRUE, row.names=1)
+rawdata <- read.table("data/vsearch-12.5.autocurated", sep="\t", header=TRUE)
+rownames(rawdata) <- rawdata$Sci.Name
 # rawdata <- read.table("data/plants.csv", sep=",", header=TRUE, row.names=1)
 
 rawmetadata <- dplyr::select(rawdata, 1:Org.Lake.Prs)  # data.frame(rawdata[1:39])
 rawmetadata$UnspacedSciName <- rownames(rawmetadata)
 # This one will give errors about some entries being messy, with not exactly two components. That's fine.
-inputtaxa <- data.frame(rawmetadata %>% separate(UnspacedSciName, into=c("Genus", "Species")) %>% replace_na(list(Species="sp.")))
-# Actual taxon-vs-species read table. Includes controls, but they'll be taken out for lack of metadata shortly.
+rawmetadata <- data.frame(rawmetadata %>% separate(UnspacedSciName, into=c("Genus", "Species")) %>% replace_na(list(Species="sp.")))
 
+# Bring in wetland statuses of individual plants.
+wetlandstatuses <- read.table("data/wetland-status.txt", sep="\t", header=TRUE) %>% select(Taxon.Acc, WetlandStatus)
+
+# Join plant statuses and status metadata.
+wetlandmeta <- read.table("data/wetland-meta.txt", sep="\t", header=TRUE)
+wetlandmeta$WetlandStatus <- as.factor(wetlandmeta$WetlandStatus)
+wetlandall <- left_join(wetlandstatuses, wetlandmeta)
+
+inputtaxa <- left_join(rawmetadata, wetlandstatuses) %>% left_join(wetlandmeta) %>% distinct() %>% column_to_rownames("Sci.Name")
+
+# Now handle vascularity, which is essentially "Nonvascular" except for Streptophyta, except for Charophyta and Bryozoa. :P
+# The condition for the last two might actually be Streptophyta/Bryozoa, etc. Need to check.
+# vasctaxa <- inputtaxa %>% rownames_to_column("Sci.Name") %>%
+#   mutate(Vascularity = "Nonvascular") %>%
+#   mutate(Vascularity = case_when(str_detect(Lower.Taxa, '^Streptophyta') ~ 'Vascular',
+#                                  TRUE ~ "Unknown")) %>%
+#   column_to_rownames("Sci.Name")
+
+vasctaxa <- inputtaxa %>% rownames_to_column("Sci.Name") %>% mutate(Vascularity = DefaultVascularity) %>% column_to_rownames("Sci.Name")
+
+# OTUs: Actual taxon-vs-species read table. Includes controls, but they'll be taken out for lack of metadata shortly.
 inputotucols <- select(rawdata, starts_with("MC"):last_col())
-inputotus <- inputotucols %>% select(one_of(workingsamples$ShortName)) %>% t()
+# Convert input to ShortNames: strip off the numeric parts of the long ID, but keep the run name for the MCs and NTCs.
+inputotucols <- inputotucols %>%
+  rename_all(
+    funs(stringr::str_replace_all(., 'MC\\.', 'MC-') %>%
+         stringr::str_replace_all(., 'runNTC\\.', 'runNTC-') %>%
+         stringr::str_replace_all(., '\\..*', '')
+    )
+  )
+
+inputotus <- inputotucols %>% select(one_of(row.names(workingsamples))) %>% t()
 
 # Make PS
 ot <- otu_table(inputotus, taxa_are_rows=FALSE)
-tt <- tax_table(as.matrix(inputtaxa))
-sd <- sample_data(mungedsamples)
+tt <- tax_table(as.matrix(vasctaxa))
+sd <- sample_data(workingsamples)
 sd$Run <- as.factor(sd$Run)    # To enable selection of samples by run
 
 psraw <- phyloseq(ot, tt, sd)
@@ -52,23 +72,19 @@ psraw <- phyloseq(ot, tt, sd)
 
 # Remove all samples that have NAs in their metadata -- basically, the blanks.
 nonblank_samples <- rownames(na.omit(sample_data(psraw)))
-ps12old <- subset_samples(psraw, sample_names(psraw) %in% nonblank_samples)
+ps12 <- subset_samples(psraw, sample_names(psraw) %in% nonblank_samples)
+# ps6  <- subset_samples(ps12, !Run %in% c("32", "33"))
+ps6  <- subset_samples(ps12, Run %in% c("32", "33"))
 
 currentfilename <- "data/ps.RData"
-save(file=currentfilename, ps, ps6old, ps6new, ps12old, ps12new)  # plain ps is actually ps6new
+save(file=currentfilename, ps6, ps12)
 load(file=currentfilename)
+
+ps <- ps6
 
 # From this point on, "ps" is the placeholder for whatever full or half dataset you're working with.
 # Eventually we'll have: ps, psbig, psdd, pslake, psddten, pslaketen, pswet, pswetdd, pswetlake, pswetlakepct
 
-# > sum(otu_table(ps12new))
-# [1] 1819384
-# > sum(otu_table(ps12old))
-# [1] 1887671
-# > sum(otu_table(ps6new))
-# [1] 1325970
-# > sum(otu_table(ps6old))
-# [1] 1328139
 
 ##########################################
 ###  Rarefaction curve for inspection  ###
@@ -85,14 +101,21 @@ dev.off()
 
 # Generates basic bar graphs and heatmaps for internal consumption
 
-pstmp <- ps6old
 
 # Basic sample aggregation levels
+pstmp <- ps
+sample_data(pstmp) <- sample_data(pstmp)[,c("Lake", "LakeAlphaSort")]
 pslake <- merge_samples(pstmp, "Lake")     # 12 samples, 3
-psdd <- merge_samples(pstmp, "Compartment")
+sample_data(pslake)$Lake <- factor(sample_names(pslake))
+
+pstmp <- ps
+sample_data(pstmp) <- sample_data(pstmp)[,c("Compartment", "ShortCompartment", "Depth", "ShoreDist")]
+psdd <- merge_samples(pstmp, "ShortCompartment")
+sample_data(psdd)$ShortCompartment <- factor(sample_names(psdd))
 
 # Remove all columns except the ones we're about to glom on.
-tax_table(pstmp) <- tax_table(pstmp)[,c("Vascularity", "WetlandSort", "WetlandStatus")]
+pstmp <- ps
+tax_table(pstmp) <- tax_table(pstmp)[,c("Vascularity", "WetlandSort", "WetlandStatus", "WetlandShortDesc", "WetlandLongDesc")]
 pswet <- tax_glom(pstmp, "WetlandStatus")                 # 7 taxa
 taxa_names(pswet) <- tax_table(pswet)[,"WetlandStatus"]
 pswetlake <- merge_samples(pswet, "Lake")                 # 12 samples
@@ -113,7 +136,8 @@ otutrans <- t(otu_table(pslake))
 allsums <- data.frame(TaxTotal=rowSums(otutrans), TaxName=rownames(otutrans))
 top_tax_table <- left_join(otutops, allsums)
 rownames(top_tax_table) <- top_tax_table[,"TaxName"]
-top_tax_table %>% arrange(TaxTotal) %>% tail(20)
+ttt <- top_tax_table %>% arrange(TaxTotal) %>% tail(20)
+write.table(file="plots/background/top-20-taxa.txt", ttt)
 
 # Plot absolute and relative read numbers per lake for vasculars and nonvasculars.
 vascbar <- plot_bar_jd(pswetlake, fill="Vascularity")
@@ -122,7 +146,8 @@ vascbarpct <- plot_bar_jd(pswetlakepct, fill="Vascularity")
 
 pstmp <- pslake
 # Remove all columns except the ones we're about to glom on.
-tax_table(pstmp) <- tax_table(pstmp)[,c("Vascularity", "WetlandSort", "WetlandStatus")]
+tax_table(pstmp) <- tax_table(pstmp)[,c("Vascularity", "WetlandSort", "WetlandStatus", "WetlandShortDesc", "WetlandLongDesc")]
+pstmp <- dezero(pstmp)
 pslakebool <- decostand(otu_table(pstmp), "pa") %>% otu_table() %>% phyloseq(tax_table(pstmp), sample_data(pstmp)) %>% tax_glom("Vascularity")
 lakeboolbar <- plot_bar_jd(pslakebool, fill="Vascularity")
 
@@ -130,16 +155,21 @@ vascbars <- grid.arrange(vascbar, vascbarpct, lakeboolbar)
 ggsave(vascbars, file="plots/background/vascular-bar.pdf", height=11, width=6)
 
 # Eliminate all irrelevant sample metadata.
-pswetdd <- dezero(merge_samples(pswet, "Compartment"))
+pstmp <- pswet
+# Remove all columns except the ones we're about to merge on.
+tax_table(pstmp) <- tax_table(pstmp)[,c("WetlandSort", "WetlandStatus", "WetlandShortDesc", "WetlandLongDesc")]
+pswetdd <- dezero(merge_samples(pstmp, "Compartment"))
 # pswetdd <- dezero(prune_taxa(taxa_names(pswetdd) != "UPL", pswetdd))
 sample_data(pswetdd)[,"Compartment"] <- sample_names(pswetdd)
 sample_data(pswetdd) <- sample_data(pswetdd)[,"Compartment"]
 
 # tax_descs <- c("Agricultural", "Upland", "Fac. Upland", "Facultative", "Fac. Wetland", "Obligate Wetland", "Aquatic", "Algae")
-tax_descs <- c("Upland", "Fac. Upland", "Facultative", "Fac. Wetland", "Obligate Wetland", "Aquatic", "Algae")
+# tax_descs <- c("Upland", "Fac. Upland", "Facultative", "Fac. Wetland", "Obligate Wetland", "Aquatic", "Algae", "Unknown")
+tax_descs <- c("Fac. Upland", "Facultative", "Obligate Wetland", "Aquatic", "Algae", "Unknown")
 
-tax_table(pswetdd) <-
-    data.frame(tax_table(pswetdd), rowname=rownames(tax_table(pswetdd))) %>%
+# tax_table(pswetdd) <-
+
+data.frame(tax_table(pswetdd), rownames=rownames(tax_table(pswetdd))) %>%
     arrange(desc(WetlandSort)) %>%
     cbind(tax_descs) %>%
     column_to_rownames() %>%
@@ -160,7 +190,7 @@ ggsave(lakewetheatmaprel, file="plots/background/lake-by-wetland-heatmap-rel.pdf
 
 # At this point we have: ps, psdd, pslake, psddten, pslaketen, pswet, pswetdd, pswetddrel, pswetlake, pswetlakepct
 # ...but we're not going to save the ones we only used for the plots above.
-save(file=currentfilename, ps, psdd, pslake, pswet)
+save(file=currentfilename, ps, ps6, ps12, psdd, pslake, pswet)
 
 
 ###############################
@@ -184,7 +214,7 @@ indices <- c("Shannon")  #, "InvSimpson", "Simpson", "Chao1")
 # New specific plots for paper/presentation
 
 inputps <- ps
-lakemeta <- read.table("data/lake-metadata.txt", header=TRUE, sep="\t", colClasses=c("Lake"="character"))
+lakemeta <- read.table("data/lake-metadata.txt", header=TRUE, sep="\t", colClasses=c("Lake"="character")) %>% filter(LakeSet == "Lake Set A")
 
 p1 <- ggplot(lakemeta, mapping=aes(x=Lake, y=Area, group=1)) +
       geom_col(size=1, color="#0099FF", fill="#0099FF", width=0.5) +
@@ -208,7 +238,7 @@ scalefac <- 2
 themetweak <- theme(legend.position="none", text = element_text(size=rel(2*scalefac)), axis.text.x = element_text(size=rel(2*scalefac), angle=0, hjust=0.5))
 # l <- plot_alpha_diversity_by(psobj=inputps, var="Lake", measures=indices)
 dep <- plot_alpha_diversity_by(psobj=inputps, var="Depth", measures=indices, scalefac=2) + themetweak
-dis <- plot_alpha_diversity_by(psobj=inputps, var="Distance", measures=indices, scalefac=2) + themetweak
+dis <- plot_alpha_diversity_by(psobj=inputps, var="ShoreDist", measures=indices, scalefac=2) + themetweak
 
 # ggsave(l, filename="plots/alpha.shannon.lake.pdf", height=4, width=6)
 ggsave(dep, filename="plots/alpha.shannon.depth.pdf", height=4, width=4)
@@ -280,11 +310,9 @@ inputps2 <- subset_samples(inputps, Depth=="Benthic")
 rev(unlist(lapply(indices, function(x) { pval_mann_whitney(x, inputps1, inputps2) } ), recursive=TRUE))
 
 print("Mann-Whitney test on alpha diversity by shore distance category:")
-inputps1 <- subset_samples(inputps, Distance=="Offshore")
-inputps2 <- subset_samples(inputps, Distance=="Nearshore")
+inputps1 <- subset_samples(inputps, ShoreDist=="Offshore")
+inputps2 <- subset_samples(inputps, ShoreDist=="Nearshore")
 rev(unlist(lapply(indices, function(x) { pval_mann_whitney(x, inputps1, inputps2) } ), recursive=TRUE))
-
-# But now...0.74 and 0.002. Distance is significant again.
 
 
 ########################
@@ -307,14 +335,14 @@ psbig <- subset_samples(psbig, sample_sums(psbig) > 100)
 pscomplement <- subset_taxa(ps, colnames(otu_table(ps)) %in% taxa_under_five)
 table(tax_table(pscomplement)[,"Vascularity"])   # Breakdown of eliminated taxa.
 
-save(file=currentfilename, ps, psbig, psdd, pslake, psddtops, pslaketops, pswet, pswetdd, pswetlake, pswetlakepct)
+save(file=currentfilename, ps, ps6, ps12, psbig, psdd, pslake, psddtops, pslaketops, pswet, pswetdd, pswetlake, pswetlakepct)
 
 inputps <- psbig    # or psbig
 indices <- c("Shannon")
 
 alphadiv <- plot_alpha_diversity_by(psobj=inputps, var="Lake", measures=indices)$data
 lakeshannonmeans <- alphadiv %>% group_by(variable, Lake) %>% dplyr::summarize(mean=mean(value)) %>% spread(variable, mean)
-lakemeta <- read.table("data/lake-metadata.txt", header=TRUE)
+lakemeta <- read.table("data/lake-metadata.txt", header=TRUE, sep="\t", colClasses=c("Lake"="character"))
 bylake <- left_join(lakemeta, lakeshannonmeans) %>%
           subset(lakemeta$Lake %in% sample_data(ps)$Lake) %>%
           select(-LakeAbbr, -Date, -AlphaSort) %>%
@@ -328,7 +356,7 @@ alpharanks <- bylake
 glarg <- data.frame(i=rep(0, 3))
 lbls <- c("PDist", "PDep", "PDD")
 for (k in rownames(alpharanks)) { tempps <- subset_samples(psbig, Lake==k);
-    glarg <- data.frame(glarg, bdiv(tempps, "Distance+Depth+Distance:Depth")$aov.tab$"Pr(>F)"[1:3], row.names=lbls) }
+    glarg <- data.frame(glarg, bdiv(tempps, "ShoreDist+Depth+ShoreDist:Depth")$aov.tab$"Pr(>F)"[1:3], row.names=lbls) }
 colnames(glarg) <- c("i", as.character(rownames(alpharanks)))
 glarg <- t(glarg[,2:dim(glarg)[2]])
 pwithinlakes <- glarg %>% as.data.frame %>% rownames_to_column %>% rename(Lake=rowname)
@@ -336,18 +364,18 @@ pwithinlakes <- glarg %>% as.data.frame %>% rownames_to_column %>% rename(Lake=r
 glarg <- data.frame(i=rep(0, 3))
 lbls <- c("R2Dist", "R2Dep", "R2DD")
 for (k in rownames(alpharanks)) { tempps <- subset_samples(psbig, Lake==k);
-    glarg <- data.frame(glarg, bdiv(tempps, "Distance+Depth+Distance:Depth")$aov.tab$R2[1:3], row.names=lbls) }
+    glarg <- data.frame(glarg, bdiv(tempps, "ShoreDist+Depth+ShoreDist:Depth")$aov.tab$R2[1:3], row.names=lbls) }
 colnames(glarg) <- c("i", as.character(rownames(alpharanks)))
 glarg <- t(glarg[,2:dim(glarg)[2]])
 r2withinlakes <- glarg %>% as.data.frame %>% rownames_to_column %>% rename(Lake=rowname)
 
 alpharanks <- alpharanks %>% rownames_to_column %>% rename(Lake=rowname)
 moarcor <- alpharanks %>% left_join(pwithinlakes) %>% left_join(r2withinlakes) %>% as.data.frame
-moarcor <- moarcor %>% select(-Lake, -Primer, -FarBelowMixed, -NearBelowMixed, -SetSort)
+moarcor <- moarcor %>% select(-Lake, -Primer, -FarBelowMixed, -NearBelowMixed, -SetSort, -LakeSet, -MixedLayer)
 bluegold <- colorRampPalette(c("blue", "white", "gold"))
 # heatmap(cor(moarcor, method="spearman"), symm=TRUE, Rowv=NA, Colv="Rowv", col=bluegold(100))
 
-lesscor <- as.tbl(moarcor) %>% select(-starts_with("Norm"), -starts_with("Chao"), -starts_with("PD"), -R2DD)
+lesscor <- as.tbl(moarcor) %>% select(-starts_with("Norm"), -starts_with("Chao"), -starts_with("PD")) # -R2DD
 
 spears <- cor(lesscor, method="spearman")
 colbreaks <- c(seq(min(spears), -0.01, length=50), 0, seq(0.01, max(spears), length=50))
@@ -395,7 +423,7 @@ arrange(fcm, abs(cor)) %>% filter(p<0.1)
 ###################
 
 inputps <- psbig
-bigpermanova <- bdiv(inputps, "Lake+Distance+Depth+Distance:Depth")
+bigpermanova <- bdiv(inputps, "Lake+ShoreDist+Depth+ShoreDist:Depth")
 runpermanova <- bdiv(inputps, "Run")
 
 f <- file("plots/permanova.txt", "w")
@@ -436,14 +464,14 @@ if(file.exists(ordfile)) {
 ord.nmds.bray = ord.bray.k20
 
 lakeplot <- plot_with_hull(inputps, ord.nmds.bray, "Lake") + make_stress_label(ord.nmds.bray)
-distplot <- plot_with_hull(inputps, ord.nmds.bray, "Distance")
+distplot <- plot_with_hull(inputps, ord.nmds.bray, "ShoreDist")
 depthplot <- plot_with_hull(inputps, ord.nmds.bray, "Depth")
 compplot <- plot_with_hull(inputps, ord.nmds.bray, "Compartment")
 runplot <- plot_with_hull(inputps, ord.nmds.bray, "Run")
 primerplot <- plot_with_hull(inputps, ord.nmds.bray, "Primer") + scale_color_manual(values = c("darkgreen", "purple"), aesthetics = c("color", "fill"))
 
 vascplot <- plot_with_hull(inputps, ord.nmds.bray, "Vascularity", type="taxa")
-vascplot <- vascplot + scale_color_manual(values = c("green", "darkgreen"), aesthetics = c("color", "fill"))
+vascplot <- vascplot + scale_color_manual(values = c("green", "darkgreen", "lightgrey"), aesthetics = c("color", "fill"))
 
 wetnessplot <- plot_with_hull_ordered(inputps, ord.nmds.bray, "WetlandStatus", type="taxa")
 
@@ -469,12 +497,12 @@ ggsave(speciesplot, file="plots/background/nmds-species-large.pdf", width=18, he
 
 # ============== Experimental =============== #
 
-pssp2 <- subset_samples(ps, Lake=="Hummingbird")
+pssp2 <- subset_samples(ps, Lake=="Brown")
 ord.bray.sp2 <- ordinate(pssp2, method="NMDS", distance="bray", k=4, trymax=100)
 sp2b <- plot_with_hull(pssp2, ord.bray.sp2, "Depth") + make_stress_label(ord.bray.sp2)
 sp2b
 
-pssp6 <- subset_samples(ps, Lake=="Raspberry")
+pssp6 <- subset_samples(ps, Lake=="Bolger")
 ord.bray.sp6 <- ordinate(pssp6, method="NMDS", distance="bray", k=4, trymax=100)
 sp6b <- plot_with_hull(pssp6, ord.bray.sp6, "Distance") + make_stress_label(ord.bray.sp6)
 sp6b
@@ -632,7 +660,7 @@ shallowonly
 
 pstmp <- ps
 # Simplify tax_table so it doesn't take forever to manipulate.
-tax_table(pstmp) <- as.matrix(select(as.data.frame(tax_table(ps)[,c("Taxon.Category", "PlantCat", "Vascularity")]), Vascularity, PlantCat, Taxon.Category, everything()))
+tax_table(pstmp) <- as.matrix(select(as.data.frame(tax_table(ps)[,c("Taxon.Category", "Vascularity")]), Vascularity, Taxon.Category, everything()))
 
 pscategories <- pstmp
 

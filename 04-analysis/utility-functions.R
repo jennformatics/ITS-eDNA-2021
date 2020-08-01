@@ -186,4 +186,4 @@ a_lakes <- c("Bergner", "Bolger", "Brown", "Crampton", "Cranberry", "Reddington"
 b_lakes <- c("Bay", "Hummingbird", "Inkpot", "Long", "Morris", "Raspberry")
 lakesordered <- c(a_lakes, b_lakes)
 
-twogreens=c("#A9D18E", "#61953D")
+twogreens=c("#A9D18E", "#61953D", "lightgrey")
