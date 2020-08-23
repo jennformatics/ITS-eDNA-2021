@@ -4,47 +4,55 @@ source("utility-functions.R")  # includes imports, functions, and other startup
 currentfilename <- "data/ps.RData"
 load(file=currentfilename)
 
+# Required metadata files are below, listed by their source Excel docs.
+# UNDERC-eDNA-sampling-metadata.xlsx
+#     sample-metadata.txt
+# lake-and-metazoa-metadata.xlsx
+#     lake-metadata.txt
+# combined-plant-info.xlsx
+#     wetland-meta.txt
+#     wetland-status.txt
+# combined-plant-info.xlsx
+
+# Input data files are tab-delimited, either *.4.organisms.passing or *.5.autocurated, from the previous pipeline. 
+
 
 #######################################
 ###  Load (highly customized) data  ###
 #######################################
 
+maindatafile <- "data/vsearch-12.5.autocurated"
+
 # SAMPLES: Import sample metadata.
 inputsamples <- read.table("data/sample-metadata.txt", sep="\t", header=TRUE, row.names=1) %>% rownames_to_column("ShortName")
 
-# CHANGE HERE if going back to 12 lakes.
-workingsamples <- inputsamples %>% filter(Run %in% c("32", "33"))
-workingsamples <- workingsamples %>% column_to_rownames("ShortName")
-
-# OTUS AND TAXA: plants.csv is a combined OTU table and taxon description table.
+# OTUS AND TAXA: "maindatafile" is a combined OTU table and taxon description table.
 # It's separated in my local case between metadata field "Org.Lake.Prs" and sample name "MC-32".
+# The first portion is joined with wetland info and becomes the taxon table.
+# The second portion becomes the OTU table, keyed to the sample data by the sample's ShortName.
 
-rawdata <- read.table("data/vsearch-12.5.autocurated", sep="\t", header=TRUE)
-rownames(rawdata) <- rawdata$Sci.Name
+rawdata <- read.table(maindatafile, sep="\t", header=TRUE)
 # rawdata <- read.table("data/plants.csv", sep=",", header=TRUE, row.names=1)
+rownames(rawdata) <- rawdata$Sci.Name
 
 rawmetadata <- dplyr::select(rawdata, 1:Org.Lake.Prs)  # data.frame(rawdata[1:39])
 rawmetadata$UnspacedSciName <- rownames(rawmetadata)
 # This one will give errors about some entries being messy, with not exactly two components. That's fine.
 rawmetadata <- data.frame(rawmetadata %>% separate(UnspacedSciName, into=c("Genus", "Species")) %>% replace_na(list(Species="sp.")))
 
-# Bring in wetland statuses of individual plants.
+# Bring in wetland/hydro/vascularity statuses of individual plants. Must contain at least the plants in the main data file, by taxon acc.
 wetlandstatuses <- read.table("data/wetland-status.txt", sep="\t", header=TRUE) %>% select(Taxon.Acc, WetlandStatus)
 
-# Join plant statuses and status metadata.
+# Join plant statuses and status metadata (sort order, alternate labels, etc.)
 wetlandmeta <- read.table("data/wetland-meta.txt", sep="\t", header=TRUE)
 wetlandmeta$WetlandStatus <- as.factor(wetlandmeta$WetlandStatus)
 wetlandall <- left_join(wetlandstatuses, wetlandmeta)
 
-inputtaxa <- left_join(rawmetadata, wetlandstatuses) %>% left_join(wetlandmeta) %>% distinct() %>% column_to_rownames("Sci.Name")
+# Join that plant metadata with the actual plant info from the source OTU file.
+inputtaxa <- left_join(rawmetadata, wetlandall) %>% distinct() %>% column_to_rownames("Sci.Name")
 
-# Now handle vascularity, which is essentially "Nonvascular" except for Streptophyta, except for Charophyta and Bryozoa. :P
-# The condition for the last two might actually be Streptophyta/Bryozoa, etc. Need to check.
-# vasctaxa <- inputtaxa %>% rownames_to_column("Sci.Name") %>%
-#   mutate(Vascularity = "Nonvascular") %>%
-#   mutate(Vascularity = case_when(str_detect(Lower.Taxa, '^Streptophyta') ~ 'Vascular',
-#                                  TRUE ~ "Unknown")) %>%
-#   column_to_rownames("Sci.Name")
+# Make sure there aren't any NAs.
+levels(inputtaxa$WetlandStatus)
 
 vasctaxa <- inputtaxa %>% rownames_to_column("Sci.Name") %>% mutate(Vascularity = DefaultVascularity) %>% column_to_rownames("Sci.Name")
 
@@ -59,12 +67,10 @@ inputotucols <- inputotucols %>%
     )
   )
 
-inputotus <- inputotucols %>% select(one_of(row.names(workingsamples))) %>% t()
-
 # Make PS
-ot <- otu_table(inputotus, taxa_are_rows=FALSE)
+ot <- otu_table(inputotucols, taxa_are_rows=TRUE)
 tt <- tax_table(as.matrix(vasctaxa))
-sd <- sample_data(workingsamples)
+sd <- sample_data(inputsamples)
 sd$Run <- as.factor(sd$Run)    # To enable selection of samples by run
 
 psraw <- phyloseq(ot, tt, sd)
@@ -74,7 +80,7 @@ psraw <- phyloseq(ot, tt, sd)
 nonblank_samples <- rownames(na.omit(sample_data(psraw)))
 ps12 <- subset_samples(psraw, sample_names(psraw) %in% nonblank_samples)
 # ps6  <- subset_samples(ps12, !Run %in% c("32", "33"))
-ps6  <- subset_samples(ps12, Run %in% c("32", "33"))
+ps6  <- subset_samples(ps12, !Run %in% c("32", "33"))
 
 currentfilename <- "data/ps.RData"
 save(file=currentfilename, ps6, ps12)
