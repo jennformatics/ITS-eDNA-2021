@@ -111,7 +111,7 @@ plot_bar_jd <- function (physeq, x = "Sample", y = "Abundance", ylab = "Abundanc
     theme_set(nmdstheme)
 
     mdf = psmelt(physeq)
-    p = ggplot(mdf, aes_string(x = reorder(mdf$Sample, mdf$Primer), y = y, fill = fill))
+    p = ggplot(mdf, aes_string(x = reorder(mdf$Sample, mdf$LakeAlphaSort), y = y, fill = fill))
     p = p + geom_bar(stat = "identity", position = "stack" ) + scale_colour_manual(values = twogreens, aesthetics = c("colour", "fill"))
     p = p + theme(axis.text.x = element_text(angle = -45, hjust = 0, vjust=0))
     p = p + ylab(ylab) + xlab(NULL)
