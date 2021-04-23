@@ -1,2 +1,2 @@
-# ITS-eDNA-2020
-Snapshot of code used in manuscript doi:&lt;TBA> 
+# ITS-eDNA-2021
+Snapshot of code used in manuscript doi:10.3389/fenvs.2021.617924
